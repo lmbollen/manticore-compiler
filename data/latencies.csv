@@ -1,0 +1,43 @@
+# Example hop-latency map: two 4x4 tori chained east/west into one 8x4 torus.
+#
+#   chip A = global columns 0..3, chip B = global columns 4..7
+#   compile with:  masm -x 8 -y 4 --hop-latencies data/latencies.csv ...
+#
+# Each row names a DIRECTED link leaving node (src_x,src_y) toward its torus
+# neighbour. A hop's latency is the number of cycles from occupying one
+# switch's channel register to occupying the next switch's register:
+#   1   = plain on-chip hop (the default for every link not listed here)
+#   1+K = a chip-to-chip crossing routed through K constant-latency pipeline
+#         stages (here K = 24, so the crossing costs 25).
+#
+# The two physical seams between the chips are crossed by four directed link
+# groups (one per row y = 0..3 each):
+#   eastbound  A->B :  (3,y) east   [A's east edge into B's west edge]
+#   eastbound  B->A :  (7,y) east   [the torus wrap, B's east edge back to A]
+#   westbound  B->A :  (4,y) west
+#   westbound  A->B :  (0,y) west   [the torus wrap]
+#
+# Only the scheduler's travel-time model uses these values; packet addressing
+# (signed hop counts) is unchanged. The physical links must honor the
+# configured latency exactly (constant-latency crossing components).
+src_x,src_y,dir,latency
+# eastbound seam A -> B (x=3 -> x=4)
+3,0,east,25
+3,1,east,25
+3,2,east,25
+3,3,east,25
+# eastbound wrap B -> A (x=7 -> x=0)
+7,0,east,25
+7,1,east,25
+7,2,east,25
+7,3,east,25
+# westbound seam B -> A (x=4 -> x=3)
+4,0,west,25
+4,1,west,25
+4,2,west,25
+4,3,west,25
+# westbound wrap A -> B (x=0 -> x=7)
+0,0,west,25
+0,1,west,25
+0,2,west,25
+0,3,west,25

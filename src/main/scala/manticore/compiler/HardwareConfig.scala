@@ -43,7 +43,8 @@ object HopLatencyMap {
     val errors = scala.collection.mutable.ArrayBuffer.empty[String]
     text.linesIterator.zipWithIndex.foreach { case (raw, ix) =>
       val line = raw.trim
-      val isHeader = ix == 0 && line.toLowerCase.startsWith("src_x")
+      // the header row may appear after leading comment lines
+      val isHeader = line.toLowerCase.startsWith("src_x")
       if (line.nonEmpty && !line.startsWith("#") && !isHeader) {
         line.split(",").map(_.trim) match {
           case Array(xs, ys, dir, ls) =>
