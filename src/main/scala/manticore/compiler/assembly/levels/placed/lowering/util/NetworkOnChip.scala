@@ -7,13 +7,23 @@ import manticore.compiler.HardwareConfig
 private[lowering] case class RecvEvent(recv: Recv, cycle: Int)
 
 /**
-  * Modeling manticore network on chip
+  * Modeling the bidirectional Manticore network on chip.
   *
+  * xHops/yHops from HardwareConfig are signed:
+  *   positive = forward (+X / +Y),  negative = backward (-X / -Y).
   *
-  * @param dimX
-  * @param dimY
+  * Link-occupancy arrays are split by direction so that a +X and a -X packet
+  * can share the same switch in the same cycle without collision (they use
+  * independent physical channels).
   *
-  * @author Mahyar emami <mahyar.emami@epfl.ch>
+  *   linksXPos(x)(y)  eastbound  link entering switch (x, y)
+  *   linksXNeg(x)(y)  westbound  link entering switch (x, y)
+  *   linksYPos(x)(y)  northbound link entering switch (x, y)  — also models
+  *                    terminal delivery (the shared y_reg in the Switch)
+  *   linksYNeg(x)(y)  southbound link entering switch (x, y)
+  *
+  * @author Mahyar emami <mahyar.emami@epfl.ch>  (original)
+  *         extended for bidirectional routing
   */
 private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
 
@@ -21,84 +31,90 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
   case object Denied               extends Response
   case class Granted(arrival: Int) extends Response
 
-  // the start time given should be the cycle at which a Send gets scheduled
-
-  // plus Latency
-
-
   case class Step(loc: Int, t: Int)
+
   class Path private[NetworkOnChip] (
       val from: ProcessId,
       val send: Send,
       val scheduleCycle: Int
   ) {
+    val to    = send.dest_id
+    val xDist = cfg.xHops(from, to)   // signed
+    val yDist = cfg.yHops(from, to)   // signed
 
+    /* The packet is enqueued to the NoC after cfg.decodeLatency + cfg.sendPipes cycles,
+     * plus 1 for the register at the switch input.
+     */
+    val enqueueTime: Int = cfg.decodeLatency + cfg.sendPipes + scheduleCycle + 1
 
-    val to = send.dest_id
-    val xDist =
-      cfg.xHops(from, to)
-    val yDist =
-      cfg.yHops(from, to)
-
-    /* The packet is enqueued to the NoC after cfg.decodeLatency + cfg.sendPipes cycle.
-     * because we send out the packet not on write back but immediately after decode with
-     * some extra pipes.
-     * Since the packet is immediately registered (to x or y), then there is an extra +1
-    */
-    val enqueueTime = cfg.decodeLatency + cfg.sendPipes +  scheduleCycle + 1
-    val xHops: Seq[Step] =
+    // Sequence of switches visited while routing in the X dimension.
+    // Steps occupy linksXPos (xDist > 0) or linksXNeg (xDist < 0).
+    val xHops: Seq[Step] = if (xDist >= 0) {
       Seq.tabulate(xDist) { i =>
-        val x_v = (from.x + i + 1) % cfg.dimX
-
-        Step(x_v, (enqueueTime + i))
+        Step((from.x + i + 1) % cfg.dimX, enqueueTime + i)
       }
-    val yHops: Seq[Step] = {
-
-      val p = Seq.tabulate(yDist) { i =>
-        val y_v = (from.y + i + 1) % cfg.dimY
-        xHops match {
-          case _ :+ last => Step(y_v, (xHops.last.t + i + 1))
-          case Seq() => // there are no steps in the X direction
-            Step(y_v, (enqueueTime + i))
-        }
+    } else {
+      Seq.tabulate(-xDist) { i =>
+        Step((from.x - i - 1 + cfg.dimX) % cfg.dimX, enqueueTime + i)
       }
-      // the last hop always occupies a Y link which the is Y output of
-      // the target switch (Y output is shared with the local output)
-      val lastHop = p match {
-        case _ :+ last => Step((to.y + 1) % cfg.dimY, (last.t + 1))
-        case Nil       =>
-          // this happens if the packet only goes in the X direction. The
-          // packet should have at least one X hop, hence xHops can not be
-          // empty (we don't have self messages so at least one the
-          // the two paths are non empty)
-          assert(
-            xHops.nonEmpty,
-            s"Can not have self messages send ${send.serialized} from ${from} with xdist = $xDist and ydist = $yDist"
-          )
-          Step((to.y + 1) % cfg.dimY, (xHops.last.t + 1))
-      }
-      p :+ lastHop
     }
 
+    // Time at which the packet leaves the last X hop (or enqueueTime if no X hops).
+    private val xDoneTime: Int = if (xHops.nonEmpty) xHops.last.t else enqueueTime - 1
+
+    // Sequence of switches visited while routing in the Y dimension.
+    // The LAST entry (lastHop) models the y_reg write in the destination switch;
+    // it always occupies linksYPos because terminal delivery uses yOutput regardless
+    // of the arrival direction.
+    val yHops: Seq[Step] = {
+      val transit: Seq[Step] = if (yDist >= 0) {
+        Seq.tabulate(yDist) { i =>
+          Step((from.y + i + 1) % cfg.dimY, xDoneTime + i + 1)
+        }
+      } else {
+        Seq.tabulate(-yDist) { i =>
+          Step((from.y - i - 1 + cfg.dimY) % cfg.dimY, xDoneTime + i + 1)
+        }
+      }
+
+      // lastHop: the destination switch's y_reg at delivery time.
+      // For northbound: the slot is at (to.y + 1) % dimY.
+      // For southbound: delivery also goes through y_reg → same model, so
+      // lastHop location is (to.y + 1) % dimY regardless of direction.
+      val lastHopTime = if (transit.nonEmpty) transit.last.t + 1 else xDoneTime + 1
+      assert(
+        xHops.nonEmpty || yDist != 0,
+        s"Can not have self messages: send ${send.serialized} from $from with xDist=$xDist yDist=$yDist"
+      )
+      transit :+ Step((to.y + 1) % cfg.dimY, lastHopTime)
+    }
   }
+
   private type LinkOccupancy = scala.collection.mutable.Set[Int]
-  private val linksX    = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
-  private val linksY    = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
+  private val linksXPos = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
+  private val linksXNeg = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
+  private val linksYPos = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
+  private val linksYNeg = Array.ofDim[LinkOccupancy](cfg.dimX, cfg.dimY)
+
   private val usedPaths = scala.collection.mutable.ArrayBuffer.empty[Path]
+
+  for (x <- 0 until cfg.dimX; y <- 0 until cfg.dimY) {
+    linksXPos(x)(y) = scala.collection.mutable.Set.empty[Int]
+    linksXNeg(x)(y) = scala.collection.mutable.Set.empty[Int]
+    linksYPos(x)(y) = scala.collection.mutable.Set.empty[Int]
+    linksYNeg(x)(y) = scala.collection.mutable.Set.empty[Int]
+  }
+
   def draw(): String = {
-
     def renderLine(y: Int): String = {
-      val topY = new StringBuilder
-      val xln  = new StringBuilder
-      val botY = new StringBuilder
-
       val ln = new StringBuilder
+      ln ++= "\n"
       for (x <- 0 until cfg.dimX) {
         ln ++= f"${"|"}%12s"
       }
       ln ++= "\n"
       for (x <- 0 until cfg.dimX) {
-        ln ++= f"    ${linksY(x)(y).size}%8d"
+        ln ++= f"    ${linksYPos(x)(y).size}%8d"
       }
       ln ++= "\n"
       for (x <- 0 until cfg.dimX) {
@@ -106,7 +122,7 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
       }
       ln ++= "\n"
       for (x <- 0 until cfg.dimX) {
-        ln ++= f"${linksX(x)(y).size}%7d->[ ]".replace(" ", "-")
+        ln ++= f"${linksXPos(x)(y).size}%7d->[ ]".replace(" ", "-")
       }
       ln ++= "\n"
       ln.toString()
@@ -119,86 +135,79 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
 
   def getPaths(): Iterable[Path] = usedPaths
 
-  // initially no link is occupied
-  for (x <- 0 until cfg.dimX; y <- 0 until cfg.dimY) {
-    linksX(x)(y) = scala.collection.mutable.Set.empty[Int]
-    linksY(x)(y) = scala.collection.mutable.Set.empty[Int]
-  }
-
-  def tryReserve(
-      from: ProcessId,
-      send: Send,
-      scheduleCycle: Int
-  ): Option[Path] = {
-    val path = new Path(from, send, scheduleCycle)
-    val canRouteHorizontally = path.xHops.forall { case Step(x, t) =>
-      linksX(x)(path.from.y).contains(t) == false
-    }
-    val canRouteVertically = path.yHops.forall { case Step(y, t) =>
-      linksY(path.to.x)(y).contains(t) == false
-    }
-    if (canRouteVertically && canRouteHorizontally) {
-      Some(path)
-    } else {
-      None
-    }
-  }
-
-  /** called by a processor to try to enqueue a Send to the NoC
-    *
-    * @param path
-    *   the path the message should traverse
-    * @return
+  /** Try to reserve the links for a Send scheduled at scheduleCycle.
+    * Returns Some(path) if all required links are free, None otherwise.
     */
+  def tryReserve(from: ProcessId, send: Send, scheduleCycle: Int): Option[Path] = {
+    val path = new Path(from, send, scheduleCycle)
+    val xLinks = if (path.xDist >= 0) linksXPos else linksXNeg
+    val canRouteX = path.xHops.forall { case Step(x, t) =>
+      !xLinks(x)(from.y).contains(t)
+    }
+    // Y routing uses the directional channel for in-transit hops and the shared y_reg
+    // (always linksYPos) for the terminal delivery:
+    //   yTransit  — the in-transit Y hops. Northbound (yDist>=0) occupy linksYPos,
+    //               southbound (yDist<0) occupy linksYNeg. These are physically distinct
+    //               channels (y_reg vs y_neg_reg), so they never collide with each other.
+    //   yTerm     — the lastHop: the destination switch's y_reg write. Terminal delivery
+    //               goes through yOutput/y_reg regardless of arrival direction, so it is
+    //               ALWAYS reserved in linksYPos (shared with northbound arrivals).
+    val yLinks   = if (path.yDist >= 0) linksYPos else linksYNeg
+    val yTransit = path.yHops.init
+    val yTerm    = path.yHops.last
+
+    val canRouteYTransit = yTransit.forall { case Step(y, t) =>
+      !yLinks(path.to.x)(y).contains(t)
+    }
+    val canRouteYTerm = !linksYPos(path.to.x)(yTerm.loc).contains(yTerm.t)
+    if (canRouteX && canRouteYTransit && canRouteYTerm) Some(path) else None
+  }
+
+  /** Reserve the links for the given path and return the RecvEvent. */
   def request(path: Path): RecvEvent = {
-    // reserve the links
     assert(tryReserve(path.from, path.send, path.scheduleCycle).nonEmpty)
     usedPaths += path
-    for (Step(x, t) <- path.xHops) {
-      linksX(x)(path.from.y) += t
-    }
-    for (Step(y, t) <- path.yHops) {
-      linksY(path.to.x)(y) += t
-    }
+
+    val xLinks = if (path.xDist >= 0) linksXPos else linksXNeg
+    for (Step(x, t) <- path.xHops) xLinks(x)(path.from.y) += t
+
+    // Mirror tryReserve: in-transit Y hops occupy the directional channel (linksYPos for
+    // northbound, linksYNeg for southbound); the terminal y_reg write is always linksYPos.
+    val yLinks   = if (path.yDist >= 0) linksYPos else linksYNeg
+    val yTransit = path.yHops.init
+    val yTerm    = path.yHops.last
+
+    for (Step(y, t) <- yTransit) yLinks(path.to.x)(y) += t
+    linksYPos(path.to.x)(yTerm.loc) += yTerm.t
 
     RecvEvent(
-      Recv(
-        path.send.rd,
-        path.send.rs,
-        path.from
-      ),
-      // computing the "true receive time" is simple, we just need to account for the extra recv pipes
-      // on the recv side of the switch before the packet is written as an instruction in the instruction memory
+      Recv(path.send.rd, path.send.rs, path.from),
       path.yHops.last.t + cfg.recvPipes
     )
   }
-
 }
 
 object NetworkOnChip {
 
   def jsonDump(network: NetworkOnChip): String = {
-
     val printer = new StringBuilder
     printer ++= (s"{\n\"topology\": [${network.cfg.dimX}, ${network.cfg.dimY}], \n\"paths\": [")
-
     network.getPaths().foreach { p =>
       val ln = s"\"source\": [${p.from.x}, ${p.from.y}],\n" +
         s"\"cycle\": ${p.scheduleCycle},\n" +
         s"\"xHops\": [${p.xHops.map(_.loc).mkString(", ")}],\n" +
         s"\"yHops\": [${p.yHops.map(_.loc).mkString(", ")}],\n" +
         s"\"target\": [${p.to.x}, ${p.to.y}]\n"
-      printer ++= ("{")
-      printer ++= (ln)
+      printer ++= "{"
+      printer ++= ln
       if (p != network.getPaths().last)
-        printer ++= ("},")
+        printer ++= "},"
       else
-        printer ++= ("}")
+        printer ++= "}"
     }
-    printer ++= ("]}")
+    printer ++= "]}"
     printer.toString()
   }
-
 
   def apply(cfg: HardwareConfig) = new NetworkOnChip(cfg)
 }

@@ -50,21 +50,30 @@ sealed trait HardwareConfig {
     case _ => maxLatency
   }
 
-  def yHops(source: ProcessId, target: ProcessId): Int =
-    (if (source.y > target.y) { dimY - source.y + target.y }
-     else { target.y - source.y }) * nHops
+  // Signed shortest-path hop counts for bidirectional routing.
+  // Positive = forward (+X/+Y); negative = backward (-X/-Y).
+  // Ties (exactly half the torus) are broken in favour of the forward direction.
+  def xHops(source: ProcessId, target: ProcessId): Int = {
+    val forward  = if (source.x <= target.x) target.x - source.x
+                   else dimX - source.x + target.x
+    val backward = dimX - forward
+    (if (forward <= backward) forward else -backward) * nHops
+  }
 
-  def xHops(source: ProcessId, target: ProcessId): Int =
-    (if (source.x > target.x) dimX - source.x + target.x
-     else target.x - source.x) * nHops
+  def yHops(source: ProcessId, target: ProcessId): Int = {
+    val forward  = if (source.y <= target.y) target.y - source.y
+                   else dimY - source.y + target.y
+    val backward = dimY - forward
+    (if (forward <= backward) forward else -backward) * nHops
+  }
 
   def xyHops(source: ProcessId, target: ProcessId): (Int, Int) = {
     (xHops(source, target), yHops(source, target))
   }
 
   def manhattan(source: ProcessId, target: ProcessId): Int = {
-    val (xDist, yDist) = xyHops(source, target)
-    xDist + yDist
+    // Absolute values because hops are now signed.
+    math.abs(xHops(source, target)) + math.abs(yHops(source, target))
   }
 
   val userGlobalMemoryBase = 0x00004000L // the first 16Ki shorts are reserved

@@ -93,10 +93,18 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     // for each process p , we need to compute the SLEEP_LENGTH as
     // vcycle_length - p.total (total is the total execution time including epilogue)
 
+    // Origin for Programmer hop computation — always core (0,0)
+    val bootOrigin = ProcessIdImpl("boot", 0, 0)
+
     val binary_stream: Seq[Int] =
       assembled.sortBy(p => p.place).flatMap { case AssembledProcess(_, body, loc, epilogue_length, total_length) =>
+        // Encode signed shortest-path hop counts from the Programmer at (0,0) to this process.
+        // Negative values are stored as 8-bit 2's complement (& 0xFF masks correctly for Scala Int).
+        val tgt  = ProcessIdImpl(s"t_${loc._1}_${loc._2}", loc._1, loc._2)
+        val xH   = ctx.hw_config.xHops(bootOrigin, tgt) & 0xFF
+        val yH   = ctx.hw_config.yHops(bootOrigin, tgt) & 0xFF
         Seq(
-          (loc._2 << 8 | loc._1).toInt,
+          (yH << 8 | xH).toInt,
           (total_length - epilogue_length).toInt
         ) ++ body.flatMap { w64: Long =>
           Seq(
@@ -339,8 +347,10 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     def SliceOfst(value: Int): Assembler                       = <<(value, 4)
     def Zero(length: Int): Assembler                           = <<(0, length)
     def Immediate(value: Int): Assembler                       = <<(value, 16)
-    def DestX(value: Int): Assembler                           = <<(value, 8)
-    def DestY(value: Int): Assembler                           = <<(value, 8)
+    // DestX/DestY encode signed 2's complement 8-bit hop counts (positive = forward,
+    // negative = backward). Mask to 8 bits so negative Int values are encoded correctly.
+    def DestX(value: Int): Assembler = { inst = inst | ((value.toLong & 0xFFL) << pos); pos += 8; this }
+    def DestY(value: Int): Assembler = { inst = inst | ((value.toLong & 0xFFL) << pos); pos += 8; this }
     private def <<(value: Int, field: Field): Assembler =
       <<(value, field.bitLength)
     private def <<(value: Int, bit_length: Int): Assembler = {
