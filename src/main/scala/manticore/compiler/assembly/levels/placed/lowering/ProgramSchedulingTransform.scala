@@ -425,6 +425,7 @@ private[lowering] object ProgramSchedulingTransform extends PlacedIRTransformer 
     ctx.logger.info(s"NoC:\n ${network.draw()}")
 
     ctx.logger.dumpArtifact(s"paths.json") { NetworkOnChip.jsonDump(network) }
+    ctx.logger.dumpArtifact(s"transactions.csv") { NetworkOnChip.csvDump(network) }
 
     // schedule the receives
     val scheduledProcesses =

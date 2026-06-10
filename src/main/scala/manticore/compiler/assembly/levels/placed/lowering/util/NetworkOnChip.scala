@@ -209,5 +209,32 @@ object NetworkOnChip {
     printer.toString()
   }
 
+  /** Human-traceable CSV of every NoC transaction in one virtual cycle, sorted per source
+    * node then by schedule time. One row per Send. Columns:
+    *   send_x,send_y   : source core
+    *   recv_x,recv_y   : destination core
+    *   xDist,yDist     : signed hop counts (>0 forward/+X+Y, <0 backward/-X-Y)
+    *   scheduleCycle   : cycle the SEND is issued (within the vcycle schedule)
+    *   enqueueCycle    : cycle the packet enters the NoC (decodeLatency+sendPipes+1 later)
+    *   expectedRecv    : cycle the destination is modeled to receive it (yHops.last + recvPipes)
+    *   send_reg/recv_reg : source/destination register names (for cross-checking the .masm)
+    * Lets the schedule's per-transaction timing be traced by hand against the RTL.
+    */
+  def csvDump(network: NetworkOnChip): String = {
+    val cfg = network.cfg
+    val sb  = new StringBuilder
+    sb ++= "send_x,send_y,recv_x,recv_y,xDist,yDist,scheduleCycle,enqueueCycle,expectedRecv,send_reg,recv_reg\n"
+    network
+      .getPaths()
+      .toSeq
+      .sortBy(p => (p.from.x, p.from.y, p.scheduleCycle))
+      .foreach { p =>
+        val expectedRecv = p.yHops.last.t + cfg.recvPipes
+        sb ++= s"${p.from.x},${p.from.y},${p.to.x},${p.to.y},${p.xDist},${p.yDist}," +
+          s"${p.scheduleCycle},${p.enqueueTime},${expectedRecv},${p.send.rs},${p.send.rd}\n"
+      }
+    sb.toString()
+  }
+
   def apply(cfg: HardwareConfig) = new NetworkOnChip(cfg)
 }
