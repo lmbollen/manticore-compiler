@@ -12,6 +12,7 @@ object Lowering {
     InterruptLoweringTransform andThen
       JumpTableNormalizationTransform andThen
       ProgramSchedulingTransform andThen
+      BootSkewPaddingTransform andThen // multi-chip: align core start times (no-op for uniform links)
       SetJumpTargetsTransform andThen
       LocalMemoryAllocation andThen
       RegisterAllocationTransform

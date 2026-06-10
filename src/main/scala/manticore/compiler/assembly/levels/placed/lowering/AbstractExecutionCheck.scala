@@ -213,8 +213,14 @@ object AbstractExecution extends PlacedIRChecker {
           doCycle(tail, nextCycle)
         case Nil => cycle
       }
-    // abstractly execute the program and collect all the messages
-    program.processes.foreach { p => doCycle(p.body)(p.id) }
+    // abstractly execute the program and collect all the messages. Each process's
+    // timeline starts at its boot-countdown skew (non-zero only with non-uniform link
+    // latencies): cores behind slow links start late, and BootSkewPaddingTransform's
+    // prepended Nops cancel exactly that skew, so the padded program's sends land at
+    // the same relative cycles the scheduler reserved (a uniform maxSkew shift).
+    program.processes.foreach { p =>
+      doCycle(p.body, ctx.hw_config.bootCountdownSkew(p.id.x, p.id.y))(p.id)
+    }
 
     val noc = NetworkOnChip(ctx.hw_config)
     // Now we know exactly when each message was scheduled. We can try to reserve

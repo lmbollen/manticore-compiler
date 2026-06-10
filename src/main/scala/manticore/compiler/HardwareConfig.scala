@@ -163,6 +163,17 @@ sealed trait HardwareConfig {
   final def yLinkLatency(x: Int, y: Int, northbound: Boolean): Int =
     hopLatencies.fold(1)(_.yLink(x, y, northbound))
 
+  /** Start-time skew of core (px,py) caused by non-uniform link latencies on the
+    * hardware Programmer's countdown path (forward: east along row 0 to the core's
+    * column, then north along it). The countdown sweep equalizes start times assuming
+    * 1-cycle hops; each extra cycle on a crossed link delays that core's start by the
+    * same amount. BootSkewPaddingTransform compensates by prepending Nops; the
+    * AbstractExecution checker uses the same skew to model real start times.
+    */
+  final def bootCountdownSkew(px: Int, py: Int): Int =
+    (0 until px).map(c => xLinkLatency(c, 0, eastbound = true) - 1).sum +
+      (0 until py).map(r => yLinkLatency(px, r, northbound = true) - 1).sum
+
   private def mod(v: Int, m: Int): Int = ((v % m) + m) % m
 
   /** total link latency of the X leg of the (dimension-ordered) route, at row source.y */
