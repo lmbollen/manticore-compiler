@@ -57,6 +57,8 @@ case class CliConfig(
     /** Machine configurations * */
     dimX: Int = 12,
     dimY: Int = 12,
+    // per-directed-link NoC hop latencies (multi-chip): CSV src_x,src_y,dir,latency
+    hopLatencies: Option[File] = None,
     // hidden
     nScratchPad: Int = DefaultHardwareConfig(2, 2).nScratchPad
 )
@@ -118,6 +120,13 @@ object Main {
           .action { case (v, c) => c.copy(dimY = v) }
           .text("vertical grid dimension")
           .required(),
+        opt[File]("hop-latencies")
+          .action { case (f, c) => c.copy(hopLatencies = Some(f)) }
+          .text(
+            "CSV of per-directed-link NoC hop latencies for multi-chip topologies " +
+              "(rows: src_x,src_y,dir,latency with dir=east|west|north|south; unlisted links = 1). " +
+              "Affects only the scheduler's travel-time model, not packet addressing."
+          ),
         cmd("interpret")
           .action { case (_, c) => c.copy(mode = InterpretMode()) }
           .text("interpret")
@@ -170,7 +179,17 @@ object Main {
         dump_ascii = cfg.dumpAscii,
         log_file = cfg.logFile,
         max_cycles = Try { cfg.mode.asInstanceOf[InterpretMode].timeout }.getOrElse(0),
-        hw_config = DefaultHardwareConfig(dimX = cfg.dimX, dimY = cfg.dimY, nScratchPad = cfg.nScratchPad)
+        hw_config = DefaultHardwareConfig(
+          dimX = cfg.dimX,
+          dimY = cfg.dimY,
+          nScratchPad = cfg.nScratchPad,
+          hopLatencies = cfg.hopLatencies.map { f =>
+            HopLatencyMap.fromCsvFile(f, cfg.dimX, cfg.dimY) match {
+              case Right(m)  => m
+              case Left(err) => sys.error(s"--hop-latencies ${f}: $err")
+            }
+          }
+        )
       )
     cfg.dumpDir.foreach { f => Files.createDirectories(f.toPath) }
 

@@ -3,6 +3,83 @@ package manticore.compiler
 import manticore.compiler.assembly.ManticoreAssemblyIR
 import manticore.compiler.assembly.levels.placed.PlacedIR
 
+/** Per-directed-link NoC hop latencies, for multi-chip topologies where some links
+  * (the chip-to-chip crossings) have long, statically-known latencies.
+  *
+  * A hop's latency is the number of cycles from occupying one switch's channel
+  * register to occupying the next switch's channel register along a directed link:
+  * 1 = a plain on-chip hop (the default for every link not listed); an inter-chip
+  * crossing routed through K constant-latency pipeline stages is 1+K.
+  *
+  * IMPORTANT: these latencies affect ONLY the scheduler's travel-time model (when
+  * values arrive, where Recvs are placed, link-slot reservations). The packet
+  * addressing — signed hop counts and the min-|hops| direction choice — is
+  * deliberately unchanged.
+  *
+  * CSV format (loaded via masm `--hop-latencies <file>`), one directed link per row:
+  *   src_x,src_y,dir,latency
+  * where dir ∈ {east,west,north,south} names the link FROM (src_x,src_y) toward its
+  * neighbour in that direction (with torus wraparound), e.g. on an 8x4 made of two
+  * chained 4x4 chips the four eastbound boundary crossings of the first seam are
+  * `3,0,east,K` … `3,3,east,K`. Lines starting with `#`, blank lines, and one
+  * optional header row are ignored.
+  */
+case class HopLatencyMap(
+    east: Map[(Int, Int), Int],
+    west: Map[(Int, Int), Int],
+    north: Map[(Int, Int), Int],
+    south: Map[(Int, Int), Int]
+) {
+  def xLink(x: Int, y: Int, eastbound: Boolean): Int =
+    (if (eastbound) east else west).getOrElse((x, y), 1)
+  def yLink(x: Int, y: Int, northbound: Boolean): Int =
+    (if (northbound) north else south).getOrElse((x, y), 1)
+}
+
+object HopLatencyMap {
+
+  def fromCsv(text: String, dimX: Int, dimY: Int): Either[String, HopLatencyMap] = {
+    val east, west, north, south = scala.collection.mutable.Map.empty[(Int, Int), Int]
+    val errors = scala.collection.mutable.ArrayBuffer.empty[String]
+    text.linesIterator.zipWithIndex.foreach { case (raw, ix) =>
+      val line = raw.trim
+      val isHeader = ix == 0 && line.toLowerCase.startsWith("src_x")
+      if (line.nonEmpty && !line.startsWith("#") && !isHeader) {
+        line.split(",").map(_.trim) match {
+          case Array(xs, ys, dir, ls) =>
+            (xs.toIntOption, ys.toIntOption, ls.toIntOption) match {
+              case (Some(x), Some(y), Some(l)) =>
+                if (x < 0 || x >= dimX || y < 0 || y >= dimY)
+                  errors += s"line ${ix + 1}: node ($x,$y) outside ${dimX}x${dimY}"
+                else if (l < 1)
+                  errors += s"line ${ix + 1}: latency $l < 1"
+                else
+                  dir.toLowerCase match {
+                    case "east"  => east((x, y)) = l
+                    case "west"  => west((x, y)) = l
+                    case "north" => north((x, y)) = l
+                    case "south" => south((x, y)) = l
+                    case other   => errors += s"line ${ix + 1}: unknown direction '$other' (east|west|north|south)"
+                  }
+              case _ => errors += s"line ${ix + 1}: malformed numbers in '$line'"
+            }
+          case _ => errors += s"line ${ix + 1}: expected 'src_x,src_y,dir,latency' but got '$line'"
+        }
+      }
+    }
+    if (errors.nonEmpty) Left(errors.mkString("; "))
+    else Right(HopLatencyMap(east.toMap, west.toMap, north.toMap, south.toMap))
+  }
+
+  def fromCsvFile(path: java.io.File, dimX: Int, dimY: Int): Either[String, HopLatencyMap] =
+    scala.util.Try(scala.io.Source.fromFile(path)) match {
+      case scala.util.Failure(e) => Left(s"could not read ${path}: ${e.getMessage}")
+      case scala.util.Success(src) =>
+        try fromCsv(src.mkString, dimX, dimY)
+        finally src.close()
+    }
+}
+
 sealed trait HardwareConfig {
   import PlacedIR._
 
@@ -71,9 +148,44 @@ sealed trait HardwareConfig {
     (xHops(source, target), yHops(source, target))
   }
 
+  // ---- per-link travel-time model (multi-chip) -------------------------------------
+  // Optional per-directed-link latencies (1 = plain on-chip hop). These affect ONLY
+  // how long the scheduler believes a hop takes — packet addressing (the signed hop
+  // counts above and their min-|hops| direction choice) is unchanged.
+  def hopLatencies: Option[HopLatencyMap] = None
+
+  /** cycles to traverse the directed X link leaving switch (x,y) east- or westward */
+  final def xLinkLatency(x: Int, y: Int, eastbound: Boolean): Int =
+    hopLatencies.fold(1)(_.xLink(x, y, eastbound))
+
+  /** cycles to traverse the directed Y link leaving switch (x,y) north- or southward */
+  final def yLinkLatency(x: Int, y: Int, northbound: Boolean): Int =
+    hopLatencies.fold(1)(_.yLink(x, y, northbound))
+
+  private def mod(v: Int, m: Int): Int = ((v % m) + m) % m
+
+  /** total link latency of the X leg of the (dimension-ordered) route, at row source.y */
+  final def xPathLatency(source: ProcessId, target: ProcessId): Int = {
+    val n    = xHops(source, target) // signed count — the route addressing actually uses
+    val east = n >= 0
+    (0 until math.abs(n)).map { i =>
+      xLinkLatency(mod(source.x + (if (east) i else -i), dimX), source.y, east)
+    }.sum
+  }
+
+  /** total link latency of the Y leg, at column target.x (X routes first) */
+  final def yPathLatency(source: ProcessId, target: ProcessId): Int = {
+    val n     = yHops(source, target)
+    val north = n >= 0
+    (0 until math.abs(n)).map { i =>
+      yLinkLatency(target.x, mod(source.y + (if (north) i else -i), dimY), north)
+    }.sum
+  }
+
   def manhattan(source: ProcessId, target: ProcessId): Int = {
-    // Absolute values because hops are now signed.
-    math.abs(xHops(source, target)) + math.abs(yHops(source, target))
+    // Travel-time of the dimension-ordered route. With no hopLatencies configured every
+    // link costs 1 and this equals |xHops| + |yHops| (the previous definition).
+    xPathLatency(source, target) + yPathLatency(source, target)
   }
 
   val userGlobalMemoryBase = 0x00004000L // the first 16Ki shorts are reserved
@@ -94,5 +206,6 @@ case class DefaultHardwareConfig(
     decodeLatency: Int = 5,
     recvPipes: Int = 7,
 
-    sendPipes: Int = 7
+    sendPipes: Int = 7,
+    override val hopLatencies: Option[HopLatencyMap] = None
 ) extends HardwareConfig

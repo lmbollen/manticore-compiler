@@ -47,33 +47,40 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
      */
     val enqueueTime: Int = cfg.decodeLatency + cfg.sendPipes + scheduleCycle + 1
 
+    private def mod(v: Int, m: Int): Int = ((v % m) + m) % m
+
     // Sequence of switches visited while routing in the X dimension.
     // Steps occupy linksXPos (xDist > 0) or linksXNeg (xDist < 0).
-    val xHops: Seq[Step] = if (xDist >= 0) {
-      Seq.tabulate(xDist) { i =>
-        Step((from.x + i + 1) % cfg.dimX, enqueueTime + i)
-      }
-    } else {
-      Seq.tabulate(-xDist) { i =>
-        Step((from.x - i - 1 + cfg.dimX) % cfg.dimX, enqueueTime + i)
+    // Each step's time advances by the (per-directed-link) hop latency: 1 for a plain
+    // on-chip hop, more for a configured slow link (e.g. an inter-chip crossing). With
+    // no hopLatencies configured this reduces exactly to the previous +1-per-hop model.
+    val xHops: Seq[Step] = {
+      val east = xDist >= 0
+      var t    = enqueueTime - 1 // the source switch's channel register
+      Seq.tabulate(math.abs(xDist)) { i =>
+        val fromX = mod(from.x + (if (east) i else -i), cfg.dimX)
+        val toX   = mod(from.x + (if (east) i + 1 else -(i + 1)), cfg.dimX)
+        t += cfg.xLinkLatency(fromX, from.y, east)
+        Step(toX, t)
       }
     }
 
     // Time at which the packet leaves the last X hop (or enqueueTime if no X hops).
     private val xDoneTime: Int = if (xHops.nonEmpty) xHops.last.t else enqueueTime - 1
 
-    // Sequence of switches visited while routing in the Y dimension.
+    // Sequence of switches visited while routing in the Y dimension (at column to.x).
     // The LAST entry (lastHop) models the y_reg write in the destination switch;
     // it always occupies linksYPos because terminal delivery uses yOutput regardless
     // of the arrival direction.
     val yHops: Seq[Step] = {
-      val transit: Seq[Step] = if (yDist >= 0) {
-        Seq.tabulate(yDist) { i =>
-          Step((from.y + i + 1) % cfg.dimY, xDoneTime + i + 1)
-        }
-      } else {
-        Seq.tabulate(-yDist) { i =>
-          Step((from.y - i - 1 + cfg.dimY) % cfg.dimY, xDoneTime + i + 1)
+      val north = yDist >= 0
+      val transit: Seq[Step] = {
+        var t = xDoneTime
+        Seq.tabulate(math.abs(yDist)) { i =>
+          val fromY = mod(from.y + (if (north) i else -i), cfg.dimY)
+          val toY   = mod(from.y + (if (north) i + 1 else -(i + 1)), cfg.dimY)
+          t += cfg.yLinkLatency(to.x, fromY, north)
+          Step(toY, t)
         }
       }
 
