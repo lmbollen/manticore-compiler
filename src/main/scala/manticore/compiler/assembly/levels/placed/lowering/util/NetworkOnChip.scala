@@ -31,7 +31,14 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
   case object Denied               extends Response
   case class Granted(arrival: Int) extends Response
 
-  case class Step(loc: Int, t: Int)
+  // span: how many consecutive cycles [t, t+span-1] the step occupies its link.
+  // 1 for a plain on-chip hop; cfg.tdmPeriod for a TDM seam crossing (the physical
+  // transceiver carries one packet per logical link per tdmPeriod cycles, so the
+  // scheduler must keep a full period free around every crossing). Windows can spill
+  // at most tdmPeriod-1 cycles past the vcycle end, but a seam ARRIVAL is always at
+  // least seamLatency (> tdmPeriod) cycles into a vcycle, so spilled windows can
+  // never collide with the next vcycle's traffic — no wrap-around handling needed.
+  case class Step(loc: Int, t: Int, span: Int = 1)
 
   class Path private[NetworkOnChip] (
       val from: ProcessId,
@@ -61,7 +68,7 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
         val fromX = mod(from.x + (if (east) i else -i), cfg.dimX)
         val toX   = mod(from.x + (if (east) i + 1 else -(i + 1)), cfg.dimX)
         t += cfg.xLinkLatency(fromX, from.y, east)
-        Step(toX, t)
+        Step(toX, t, cfg.xLinkOccupancy(fromX, from.y, east))
       }
     }
 
@@ -80,7 +87,7 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
           val fromY = mod(from.y + (if (north) i else -i), cfg.dimY)
           val toY   = mod(from.y + (if (north) i + 1 else -(i + 1)), cfg.dimY)
           t += cfg.yLinkLatency(to.x, fromY, north)
-          Step(toY, t)
+          Step(toY, t, cfg.yLinkOccupancy(to.x, fromY, north))
         }
       }
 
@@ -148,8 +155,8 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
   def tryReserve(from: ProcessId, send: Send, scheduleCycle: Int): Option[Path] = {
     val path = new Path(from, send, scheduleCycle)
     val xLinks = if (path.xDist >= 0) linksXPos else linksXNeg
-    val canRouteX = path.xHops.forall { case Step(x, t) =>
-      !xLinks(x)(from.y).contains(t)
+    val canRouteX = path.xHops.forall { case Step(x, t, span) =>
+      (t until t + span).forall(c => !xLinks(x)(from.y).contains(c))
     }
     // Y routing uses the directional channel for in-transit hops and the shared y_reg
     // (always linksYPos) for the terminal delivery:
@@ -163,8 +170,8 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
     val yTransit = path.yHops.init
     val yTerm    = path.yHops.last
 
-    val canRouteYTransit = yTransit.forall { case Step(y, t) =>
-      !yLinks(path.to.x)(y).contains(t)
+    val canRouteYTransit = yTransit.forall { case Step(y, t, span) =>
+      (t until t + span).forall(c => !yLinks(path.to.x)(y).contains(c))
     }
     val canRouteYTerm = !linksYPos(path.to.x)(yTerm.loc).contains(yTerm.t)
     if (canRouteX && canRouteYTransit && canRouteYTerm) Some(path) else None
@@ -176,7 +183,7 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
     usedPaths += path
 
     val xLinks = if (path.xDist >= 0) linksXPos else linksXNeg
-    for (Step(x, t) <- path.xHops) xLinks(x)(path.from.y) += t
+    for (Step(x, t, span) <- path.xHops; c <- t until t + span) xLinks(x)(path.from.y) += c
 
     // Mirror tryReserve: in-transit Y hops occupy the directional channel (linksYPos for
     // northbound, linksYNeg for southbound); the terminal y_reg write is always linksYPos.
@@ -184,7 +191,7 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
     val yTransit = path.yHops.init
     val yTerm    = path.yHops.last
 
-    for (Step(y, t) <- yTransit) yLinks(path.to.x)(y) += t
+    for (Step(y, t, span) <- yTransit; c <- t until t + span) yLinks(path.to.x)(y) += c
     linksYPos(path.to.x)(yTerm.loc) += yTerm.t
 
     RecvEvent(

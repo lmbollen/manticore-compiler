@@ -59,6 +59,7 @@ case class CliConfig(
     dimY: Int = 12,
     // per-directed-link NoC hop latencies (multi-chip): CSV src_x,src_y,dir,latency
     hopLatencies: Option[File] = None,
+    tdmPeriod: Int = 1,
     // hidden
     nScratchPad: Int = DefaultHardwareConfig(2, 2).nScratchPad
 )
@@ -127,6 +128,14 @@ object Main {
               "(rows: src_x,src_y,dir,latency with dir=east|west|north|south; unlisted links = 1). " +
               "Affects only the scheduler's travel-time model, not packet addressing."
           ),
+        opt[Int]("tdm-period")
+          .action { case (v, c) => c.copy(tdmPeriod = v) }
+          .text(
+            "TDM serialization period of the multi-chip seam links: a slow link " +
+              "(--hop-latencies latency > 1) physically carries one packet per logical link " +
+              "per this many cycles, so the scheduler reserves the link for the full window " +
+              "per crossing. Typically 2*dimY*cyclesPerSlot for an X seam. 1 = off (default)."
+          ),
         cmd("interpret")
           .action { case (_, c) => c.copy(mode = InterpretMode()) }
           .text("interpret")
@@ -188,7 +197,8 @@ object Main {
               case Right(m)  => m
               case Left(err) => sys.error(s"--hop-latencies ${f}: $err")
             }
-          }
+          },
+          tdmPeriod = cfg.tdmPeriod
         )
       )
     cfg.dumpDir.foreach { f => Files.createDirectories(f.toPath) }

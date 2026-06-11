@@ -163,6 +163,23 @@ sealed trait HardwareConfig {
   final def yLinkLatency(x: Int, y: Int, northbound: Boolean): Int =
     hopLatencies.fold(1)(_.yLink(x, y, northbound))
 
+  /** TDM serialization period of the multi-chip seam links (masm `--tdm-period`).
+    * A slow link (latency > 1) is physically a time-division-multiplexed transceiver
+    * lane that carries ONE packet per logical link per `tdmPeriod` cycles. The
+    * scheduler models this as the link staying occupied for `tdmPeriod` consecutive
+    * cycles per crossing (a window reservation in NetworkOnChip) — no extra sends or
+    * receives, just a wider reservation. 1 disables the model (plain-wire seams).
+    */
+  def tdmPeriod: Int = 1
+
+  /** how many consecutive cycles a crossing occupies the directed X link */
+  final def xLinkOccupancy(x: Int, y: Int, eastbound: Boolean): Int =
+    if (xLinkLatency(x, y, eastbound) > 1) tdmPeriod else 1
+
+  /** how many consecutive cycles a crossing occupies the directed Y link */
+  final def yLinkOccupancy(x: Int, y: Int, northbound: Boolean): Int =
+    if (yLinkLatency(x, y, northbound) > 1) tdmPeriod else 1
+
   /** Start-time skew of core (px,py) caused by non-uniform link latencies on the
     * hardware Programmer's countdown path (forward: east along row 0 to the core's
     * column, then north along it). The countdown sweep equalizes start times assuming
@@ -219,5 +236,6 @@ case class DefaultHardwareConfig(
     recvPipes: Int = 7,
 
     sendPipes: Int = 7,
-    override val hopLatencies: Option[HopLatencyMap] = None
+    override val hopLatencies: Option[HopLatencyMap] = None,
+    override val tdmPeriod: Int = 1
 ) extends HardwareConfig
