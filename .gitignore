@@ -10,3 +10,4 @@ project/metals.sbt
 target/
 test_run_dir
 obj_dir
+.pre-commit-config.yaml
