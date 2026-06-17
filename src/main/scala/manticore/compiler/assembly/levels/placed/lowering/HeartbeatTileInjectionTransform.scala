@@ -78,26 +78,47 @@ object HeartbeatTileInjectionTransform extends PlacedIRTransformer {
     val hopLatency = 1
 
     def chipOf(p: DefProcess): (Int, Int) = (p.id.x / chipDimX, p.id.y / chipDimY)
-    def isTerminating(i: Interrupt): Boolean = i.description match {
-      case SimpleInterruptDescription(FinishInterrupt | StopInterrupt | AssertionInterrupt, _, _) => true
-      case _                                                                                      => false
-    }
 
     val byChip = program.processes.groupBy(chipOf)
-    // one privileged tile per chip: prefer a process that already raises a terminating
-    // interrupt (the chip-local reporter); otherwise augment the first process there.
-    val tileOf: Map[(Int, Int), DefProcess] = byChip.map { case (chip, procs) =>
-      val tile = procs
-        .find(_.body.exists { case i: Interrupt => isTerminating(i); case _ => false })
-        .getOrElse(procs.head)
-      chip -> tile
-    }
+    def isPrivileged(p: DefProcess): Boolean = p.body.exists(_.isInstanceOf[PrivilegedInstruction])
+    def cornerOf(chip: (Int, Int)): (Int, Int) = (chip._1 * chipDimX, chip._2 * chipDimY)
+
+    // EVERY chip in the grid gets exactly one heartbeat tile, on its MASTER core
+    // (chip-local (0,0) = the global corner) — only the master core's exception reaches
+    // that chip's Management. Selection per chip:
+    //   - if the chip hosts the application reporter (a privileged process), that IS the
+    //     tile (a second privileged process would break CodeDump; the reporter is placed
+    //     on the chip master);
+    //   - else augment the process already at the corner;
+    //   - else synthesize a minimal tile process at the corner (covers chips the placer
+    //     left empty — without this they would never receive a STALL and never gate).
+    val allChips: Seq[(Int, Int)] =
+      for (cx <- 0 until chipCols; cy <- 0 until chipRows) yield (cx, cy)
+    val syntheticTiles = scala.collection.mutable.ArrayBuffer.empty[DefProcess]
+    val tileOf: Map[(Int, Int), DefProcess] = allChips.map { chip =>
+      val (cornerX, cornerY) = cornerOf(chip)
+      val picked = byChip
+        .getOrElse(chip, Seq.empty)
+        .find(isPrivileged)
+        .orElse(program.processes.find(p => p.id.x == cornerX && p.id.y == cornerY))
+        .getOrElse {
+          val syn = DefProcess(
+            id = ProcessIdImpl(s"hb_tile_${chip._1}_${chip._2}", cornerX, cornerY),
+            registers = Seq.empty,
+            functions = Seq.empty,
+            body = Seq.empty
+          )
+          syntheticTiles += syn
+          syn
+        }
+      chip -> picked
+    }.toMap
     val tileId: Map[(Int, Int), ProcessId] = tileOf.map { case (chip, p) => chip -> p.id }
 
     def neighbours(chip: (Int, Int)): Seq[(Int, Int)] = {
       val (cx, cy) = chip
       Seq((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)).filter { case (x, y) =>
-        x >= 0 && x < chipCols && y >= 0 && y < chipRows && tileOf.contains((x, y))
+        x >= 0 && x < chipCols && y >= 0 && y < chipRows
       }
     }
 
@@ -106,16 +127,18 @@ object HeartbeatTileInjectionTransform extends PlacedIRTransformer {
       s"%hb_rx_${receiver._1}_${receiver._2}_from_${sender._1}_${sender._2}"
 
     ctx.logger.info(
-      s"Stall-wave heartbeat: ${chipCols}x${chipRows} chips, diameter ${diameter}, seed ${seedVal}"
+      s"Stall-wave heartbeat: ${chipCols}x${chipRows} chips, diameter ${diameter}, seed ${seedVal}, " +
+        s"${syntheticTiles.length} synthetic tile(s) on empty chips"
     )
 
     val rewritten: Map[ProcessId, DefProcess] = tileOf.map { case (chip, proc) =>
       proc.id -> augmentTile(chip, proc, neighbours(chip), tileId, seedVal, hopLatency, rxName)
     }
 
-    program.copy(processes = program.processes.map { p =>
-      rewritten.getOrElse(p.id, p)
-    })
+    // replace augmented existing processes in place; append the synthetic corner tiles
+    val existing  = program.processes.map { p => rewritten.getOrElse(p.id, p) }
+    val synthetic = syntheticTiles.toSeq.map { syn => rewritten(syn.id) }
+    program.copy(processes = existing ++ synthetic)
   }
 
   private def augmentTile(
