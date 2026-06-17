@@ -45,7 +45,9 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     }
 
   def makeBinaryStream(
-      assembled: Seq[AssembledProcess]
+      assembled: Seq[AssembledProcess],
+      bootOriginX: Int = 0,
+      bootOriginY: Int = 0
   )(implicit ctx: AssemblyContext): Seq[Int] = {
 
     // +++++++++++++++++++++ MANTICORE BINARY STREAM FORMAT+++++++++++++++++++++++++++
@@ -93,8 +95,10 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     // for each process p , we need to compute the SLEEP_LENGTH as
     // vcycle_length - p.total (total is the total execution time including epilogue)
 
-    // Origin for Programmer hop computation — always core (0,0)
-    val bootOrigin = ProcessIdImpl("boot", 0, 0)
+    // Origin for Programmer hop computation. (0,0) for a whole-torus boot; for a per-chip
+    // image it is the chip's LOCAL origin, so each block's dest hops are relative to that
+    // chip's bootloader (the boot stays intra-chip — small forward hops on the wide field).
+    val bootOrigin = ProcessIdImpl("boot", bootOriginX, bootOriginY)
 
     val binary_stream: Seq[Int] =
       assembled.sortBy(p => p.place).flatMap { case AssembledProcess(_, body, loc, epilogue_length, total_length) =>
@@ -123,10 +127,12 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
 
   def generateCode(
       assembled: Seq[AssembledProcess],
-      dir_name: Path
+      dir_name: Path,
+      bootOriginX: Int = 0,
+      bootOriginY: Int = 0
   )(implicit ctx: AssemblyContext): Unit = {
 
-    val binary_stream: Seq[Int] = makeBinaryStream(assembled)
+    val binary_stream: Seq[Int] = makeBinaryStream(assembled, bootOriginX, bootOriginY)
 
     // print the instructions in ASCII format for debugging
     if (ctx.dump_ascii) {

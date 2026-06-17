@@ -60,6 +60,14 @@ case class CliConfig(
     // per-directed-link NoC hop latencies (multi-chip): CSV src_x,src_y,dir,latency
     hopLatencies: Option[File] = None,
     tdmPeriod: Int = 1,
+    // per-chip image split (programming only): chip tile size in the global torus.
+    // 0 = single combined image (single chip).
+    chipDimX: Int = 0,
+    chipDimY: Int = 0,
+    // distributed scheduled stall wave (multi-IC): countdown heartbeat on privileged
+    // cores instead of immediate gate-on-exception. Off by default.
+    stallWave: Boolean = false,
+    stallMargin: Int = 4,
     // hidden
     nScratchPad: Int = DefaultHardwareConfig(2, 2).nScratchPad
 )
@@ -136,6 +144,26 @@ object Main {
               "per this many cycles, so the scheduler reserves the link for the full window " +
               "per crossing. Typically 2*dimY*cyclesPerSlot for an X seam. 1 = off (default)."
           ),
+        opt[Int]("chip-dim-x")
+          .action { case (v, c) => c.copy(chipDimX = v) }
+          .text(
+            "chip tile width for the per-chip IMAGE SPLIT (programming only): the emitted " +
+              "image is split into one image per physical chip, node (x,y) -> chip (x/chip-dim-x, " +
+              "y/chip-dim-y). 0 = single combined image (default). Does not affect compilation."
+          ),
+        opt[Int]("chip-dim-y")
+          .action { case (v, c) => c.copy(chipDimY = v) }
+          .text("chip tile height for the per-chip image split (see --chip-dim-x). 0 = off (default)."),
+        opt[Unit]("stall-wave")
+          .action { case (_, c) => c.copy(stallWave = true) }
+          .text(
+            "distributed scheduled stall wave: exceptions seed a per-vcycle countdown " +
+              "heartbeat on the privileged core(s) that gates the clock when it reaches zero " +
+              "(every IC on the same vcycle), instead of gating immediately on the exception."
+          ),
+        opt[Int]("stall-margin")
+          .action { case (v, c) => c.copy(stallMargin = v) }
+          .text("safety margin (vcycles) added to the chip-grid diameter for the stall countdown seed (default 4)."),
         cmd("interpret")
           .action { case (_, c) => c.copy(mode = InterpretMode()) }
           .text("interpret")
@@ -188,6 +216,10 @@ object Main {
         dump_ascii = cfg.dumpAscii,
         log_file = cfg.logFile,
         max_cycles = Try { cfg.mode.asInstanceOf[InterpretMode].timeout }.getOrElse(0),
+        chipDimX = cfg.chipDimX,
+        chipDimY = cfg.chipDimY,
+        stallWave = cfg.stallWave,
+        stallMargin = cfg.stallMargin,
         hw_config = DefaultHardwareConfig(
           dimX = cfg.dimX,
           dimY = cfg.dimY,

@@ -219,7 +219,12 @@ object AbstractExecution extends PlacedIRChecker {
     // prepended Nops cancel exactly that skew, so the padded program's sends land at
     // the same relative cycles the scheduler reserved (a uniform maxSkew shift).
     program.processes.foreach { p =>
-      doCycle(p.body, ctx.hw_config.bootCountdownSkew(p.id.x, p.id.y))(p.id)
+      // Per-chip boot (ctx.chipDimX > 0): no boot-skew padding is applied (each chip boots
+      // its own cores intra-chip on uniform hops, and Bittide aligns the ICs' resets), so
+      // every core's timeline starts at cycle 0 — matching BootSkewPaddingTransform's no-op.
+      val startSkew =
+        if (ctx.chipDimX > 0) 0 else ctx.hw_config.bootCountdownSkew(p.id.x, p.id.y)
+      doCycle(p.body, startSkew)(p.id)
     }
 
     val noc = NetworkOnChip(ctx.hw_config)

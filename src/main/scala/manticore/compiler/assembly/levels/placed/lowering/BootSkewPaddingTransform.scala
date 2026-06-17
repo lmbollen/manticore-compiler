@@ -31,6 +31,16 @@ object BootSkewPaddingTransform extends PlacedIRTransformer {
 
   override def transform(program: DefProgram)(implicit ctx: AssemblyContext): DefProgram = {
 
+    // Per-chip boot (the image is split per chip, ctx.chipDimX > 0): each chip's
+    // bootloader boots only its own cores over INTRA-CHIP, uniform 1-cycle hops (no
+    // seam during boot), so the Programmer's own start-countdown sweep already aligns
+    // them; and Bittide releases every IC from reset at a coordinated time, so there is
+    // no inter-IC boot offset to compensate either. The seam-aware skew below applies
+    // ONLY to the single-master boot-over-seam model (whole-torus boot).
+    if (ctx.chipDimX > 0) {
+      return program
+    }
+
     val skews =
       program.processes.map(p => p.id -> ctx.hw_config.bootCountdownSkew(p.id.x, p.id.y)).toMap
     val maxSkew = if (skews.isEmpty) 0 else skews.values.max

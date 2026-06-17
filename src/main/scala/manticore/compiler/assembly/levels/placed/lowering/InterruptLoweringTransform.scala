@@ -9,6 +9,7 @@ import manticore.compiler.assembly.SerialInterrupt
 import manticore.compiler.assembly.StopInterrupt
 import manticore.compiler.assembly.levels.ConstType
 import manticore.compiler.assembly.levels.UInt16
+import manticore.compiler.assembly.annotations.StallWaveMarker
 import scala.util.Try
 import scala.util.Failure
 import scala.util.Success
@@ -22,6 +23,12 @@ import scala.util.Success
 
 object InterruptLoweringTransform extends PlacedIRTransformer {
   import PlacedIR._
+
+  /** Reserved exception id for the distributed scheduled stall wave; must match
+    * the hardware `Management.STALL_EID`. Sits just below the failure-eid range
+    * (failureEid counts up from 0x8000) and far above any practical success eid.
+    */
+  val StallEid: Int = 0x7FFF
 
   override def transform(program: DefProgram)(implicit ctx: AssemblyContext): DefProgram = {
     program.copy(processes = program.processes.map(transform))
@@ -109,7 +116,13 @@ object InterruptLoweringTransform extends PlacedIRTransformer {
           case d: SimpleInterruptDescription =>
             assert(!d.action.isInstanceOf[SerialInterrupt], s"did not expect action ${intr}")
             val eid =
-              if (d.action == AssertionInterrupt || d.action == StopInterrupt) failureEid.next() else successEid.next()
+              if (intr.annons.exists(_.name == StallWaveMarker.name)) {
+                // Distributed scheduled stall wave: reserved STALL eid, matching the
+                // hardware Management.STALL_EID. Gates the clock; not a success/failure
+                // report (it must stay out of both eid counters' ranges).
+                InterruptLoweringTransform.StallEid
+              } else if (d.action == AssertionInterrupt || d.action == StopInterrupt) failureEid.next()
+              else successEid.next()
             intr.copy(
               description = d.copy(eid = eid)
             )

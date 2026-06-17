@@ -39,6 +39,7 @@ object ManticorePasses {
       UnconstrainedNameChecker andThen
       UnconstrainedIRParMuxDeconstructionTransform andThen
       UnconstrainedNameChecker andThen
+      UnconstrainedStallWaveTransform andThen
       UnconstrainedGraphStatistics
 
   val middleend =

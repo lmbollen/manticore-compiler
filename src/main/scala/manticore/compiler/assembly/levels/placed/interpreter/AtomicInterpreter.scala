@@ -436,6 +436,12 @@ object AtomicInterpreter extends PlacedIRChecker {
     }
     val vcycle_length = cores.map { _._2.instructionMemory.length }.max
 
+    // Deferred traps captured across the whole run (stall wave): application
+    // exceptions that did not terminate but whose outcome must still color the
+    // final result. A Set because the same exception recurs every vcycle of the
+    // quiesce window.
+    private val deferredSeen = scala.collection.mutable.Set.empty[InterpretationTrap]
+
     override def interpretVirtualCycle(): Seq[InterpretationTrap] = {
 
       val traps      = scala.collection.mutable.Queue.empty[InterpretationTrap]
@@ -446,6 +452,7 @@ object AtomicInterpreter extends PlacedIRChecker {
         cores.foreach { case (_, core) => core.step() }
         cores.foreach { case (cid, c) =>
           traps ++= c.dequeueTraps()
+          deferredSeen ++= c.dequeueDeferred()
           if (traps.nonEmpty) {
             break = true
           }
@@ -497,7 +504,10 @@ object AtomicInterpreter extends PlacedIRChecker {
         )
         false
       } else { // if (traps.nonEmpty) {
-        val no_error = traps.forall {
+        // Fold in deferred (stall-wave) traps: termination is via the STALL
+        // FinishTrap, but a deferred assertion/stop failure in the quiesce window
+        // must still be reported as an error.
+        val no_error = (traps ++ deferredSeen).forall {
           case FailureTrap | InternalTrap => false
           case FinishTrap                 => true
         }

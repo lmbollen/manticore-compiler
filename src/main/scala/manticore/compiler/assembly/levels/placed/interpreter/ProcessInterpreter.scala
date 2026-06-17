@@ -12,6 +12,7 @@ import manticore.compiler.FormatString.FmtDec
 import manticore.compiler.FormatString.FmtHex
 import manticore.compiler.FormatString.FmtConcat
 import manticore.compiler.assembly.{FinishInterrupt, StopInterrupt, SerialInterrupt, AssertionInterrupt}
+import manticore.compiler.assembly.levels.placed.lowering.InterruptLoweringTransform
 import scala.util.Try
 trait ProcessInterpreter extends InterpreterBase {
 
@@ -51,6 +52,15 @@ trait ProcessInterpreter extends InterpreterBase {
   def enqueueInbox(msg: Message): Unit
 
   def dequeueTraps(): Seq[InterpretationTrap]
+
+  // Deferred (captured-but-non-terminating) traps for the distributed stall wave.
+  // In stallWave mode an application exception records its outcome here WITHOUT
+  // ending the run (the clock keeps ticking through the quiesce window); only the
+  // reserved STALL interrupt terminates. The program interpreter folds these into
+  // the final result so a deferred assertion/stop failure is still reported.
+  private val _deferredTraps = scala.collection.mutable.Queue.empty[InterpretationTrap]
+  def deferTrap(kind: InterpretationTrap): Unit       = { _deferredTraps += kind }
+  def dequeueDeferred(): Seq[InterpretationTrap]       = _deferredTraps.dequeueAll(_ => true)
 
   def enqueueSerial(value: UInt16): Unit
 
@@ -284,16 +294,27 @@ trait ProcessInterpreter extends InterpreterBase {
     case intr @ Interrupt(description, condition, _, _) =>
       val en = read(condition) == UInt16(1)
 
+      // Distributed scheduled stall wave: the reserved STALL interrupt (eid 0x7FFF)
+      // is the only thing that gates/terminates; application exceptions are captured
+      // but deferred so execution runs through the quiesce window (deferred-precise,
+      // matching hardware Management.gate_trigger/capture_eid).
+      val isStall = description.eid == InterruptLoweringTransform.StallEid
+      def reportTrap(kind: InterpretationTrap): Unit =
+        if (ctx.stallWave) deferTrap(kind) else trap(kind)
+
       description.action match {
         case AssertionInterrupt if !en =>
           ctx.logger.error("Assertion failed!", intr)
-          trap(FailureTrap)
+          reportTrap(FailureTrap)
+        case FinishInterrupt if en && isStall =>
+          ctx.logger.info("Stall wave reached zero; gating clock", intr)
+          trap(FinishTrap)
         case FinishInterrupt if en =>
           ctx.logger.info("Got finish!", intr)
-          trap(FinishTrap)
+          reportTrap(FinishTrap)
         case StopInterrupt if en =>
           ctx.logger.error("Got stop!", intr)
-          trap(FailureTrap)
+          reportTrap(FailureTrap)
         case SerialInterrupt(fmt) if en =>
           // see whether we should use the abstract queue or the global memory
           val desc = description.asInstanceOf[SerialInterruptDescription]

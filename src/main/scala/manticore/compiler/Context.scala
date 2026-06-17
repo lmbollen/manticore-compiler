@@ -35,6 +35,23 @@ trait AssemblyContext {
   val stats: StatisticCollector
   val hw_config: HardwareConfig
 
+  // ---- per-chip image split (programming only) -------------------------------------
+  // The compiler compiles ONE topology (the global hw_config.dimX x dimY torus). These
+  // are purely a CODE-GENERATION concern: when > 0 the emitted image is split into one
+  // image per physical chip, by node location — node (x,y) goes to chip
+  // (x / chipDimX, y / chipDimY). 0 (default) = a single combined image (single chip).
+  val chipDimX: Int
+  val chipDimY: Int
+
+  // ---- distributed scheduled stall wave (multi-IC) ---------------------------------
+  // When true, exceptions no longer gate the clock immediately. Instead the privileged
+  // core(s) run a per-vcycle countdown heartbeat (seed = stallMargin + chip-grid
+  // diameter; SEND to neighbour privileged cores, travel-adjusted min-merge, saturating
+  // decrement) and fire a STALL-eid interrupt when the countdown reaches zero, so every
+  // IC gates on the SAME vcycle. False (default) = the immediate gate-on-exception.
+  val stallWave: Boolean
+  val stallMargin: Int
+
   def uniqueNumber(): Int
 
 
@@ -59,8 +76,11 @@ object AssemblyContext {
       val expected_cycles: Option[Int],
       val logger: Logger,
       val stats: StatisticCollector,
-      val hw_config: HardwareConfig
-
+      val hw_config: HardwareConfig,
+      val chipDimX: Int,
+      val chipDimY: Int,
+      val stallWave: Boolean,
+      val stallMargin: Int
   ) extends AssemblyContext {
 
     var unique_int: AtomicInteger = new AtomicInteger(0)
@@ -87,7 +107,11 @@ object AssemblyContext {
       expected_cycles: Option[Int] = None,
       logger: Option[Logger] = None,
       log_file: Option[File] = None,
-      hw_config: HardwareConfig = DefaultHardwareConfig(2, 2)
+      hw_config: HardwareConfig = DefaultHardwareConfig(2, 2),
+      chipDimX: Int = 0,
+      chipDimY: Int = 0,
+      stallWave: Boolean = false,
+      stallMargin: Int = 4
   ): AssemblyContext = {
     new ContextImpl(
       output_dir = output_dir,
@@ -107,7 +131,11 @@ object AssemblyContext {
         Logger(debug_message, !quiet, dump_dir, dump_all, log_file)
       ),
       stats = StatisticCollector(),
-      hw_config = hw_config
+      hw_config = hw_config,
+      chipDimX = chipDimX,
+      chipDimY = chipDimY,
+      stallWave = stallWave,
+      stallMargin = stallMargin
     )
   }
 
