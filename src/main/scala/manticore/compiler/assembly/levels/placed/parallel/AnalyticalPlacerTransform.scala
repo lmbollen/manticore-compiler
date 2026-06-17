@@ -1065,10 +1065,17 @@ object AnalyticalPlacerTransform extends PlacedIRTransformer {
         case _                                                              => false
       }
     }
-    assert(
-      privilegedProcs.size == 1,
-      s"Error: Found ${privilegedProcs.size} privileged processes, but expected to only find 1."
-    )
+    // NOTE: privilegedProcId/privilegedCoreId below only feed the (currently
+    // commented-out) ILP/CP-SAT placers; the active placement is the round-robin /
+    // @LOC hint computed by assignProcessesToCoresRoundRobin. We therefore allow MORE
+    // THAN ONE privileged process so the multi-IC distributed stall wave can place one
+    // privileged tile per chip (each running its own countdown heartbeat + STALL). A
+    // single global privileged process remains the common case.
+    if (privilegedProcs.isEmpty) {
+      ctx.logger.fail("Could not find a privileged process")
+    } else if (privilegedProcs.size > 1) {
+      ctx.logger.info(s"Found ${privilegedProcs.size} privileged processes (per-chip privileged tiles)")
+    }
     val privilegedProcId = procNameToProcId(privilegedProcs.head.id.id)
     val privilegedCoreId = CoreId(0, 0)
     ctx.logger.info(s"Privileged process has process id ${privilegedProcId}")

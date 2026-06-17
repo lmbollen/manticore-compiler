@@ -276,7 +276,10 @@ trait UnconstrainedGraphStatistics
       val histWidth = schedule
         .groupBy { case (v, vTime) => vTime }
         .map { case (vTime, map) => vTime -> map.size }
-      val depth = schedule.values.max
+      // A process can legitimately have an empty schedule (e.g. a chip whose user
+      // compute was all DCE'd and that only hosts a stall-wave heartbeat tile, added
+      // later post-placement); report depth 0 rather than crashing on empty.max.
+      val depth = schedule.values.maxOption.getOrElse(0)
       val numVertices = dependenceGraph.vertexSet().size()
 
       ctx.logger.dumpArtifact(
@@ -298,7 +301,12 @@ trait UnconstrainedGraphStatistics
       program: DefProgram
   )(implicit ctx: AssemblyContext): DefProgram = {
     if (program.processes.size > 1) {
-      ctx.logger.error("More than one process! Cannot determine program parallelism.")
+      // Statistics-only pass: it cannot summarize whole-program parallelism as a single
+      // number across multiple processes, but it still computes and dumps per-process
+      // stats below and returns the program unchanged. A multi-process program is a
+      // normal frontend state (e.g. NoC send/receive tests), so this must not abort
+      // compilation — warn instead of error.
+      ctx.logger.warn("More than one process! Skipping whole-program parallelism summary.")
     }
     program.processes.foreach(proc => onProcess(proc))
     // Does not modify program, simply computes statistics on it.
