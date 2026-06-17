@@ -46,8 +46,10 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
 
   def makeBinaryStream(
       assembled: Seq[AssembledProcess],
-      bootOriginX: Int = 0,
-      bootOriginY: Int = 0
+      chipDimX: Int = 0,
+      chipDimY: Int = 0,
+      chipCols: Int = 0,
+      chipRows: Int = 0
   )(implicit ctx: AssemblyContext): Seq[Int] = {
 
     // +++++++++++++++++++++ MANTICORE BINARY STREAM FORMAT+++++++++++++++++++++++++++
@@ -95,18 +97,33 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     // for each process p , we need to compute the SLEEP_LENGTH as
     // vcycle_length - p.total (total is the total execution time including epilogue)
 
-    // Origin for Programmer hop computation. (0,0) for a whole-torus boot; for a per-chip
-    // image it is the chip's LOCAL origin, so each block's dest hops are relative to that
-    // chip's bootloader (the boot stays intra-chip — small forward hops on the wide field).
-    val bootOrigin = ProcessIdImpl("boot", bootOriginX, bootOriginY)
+    // The boot loader (Programmer) sits at the array origin (0,0) and routes each
+    // process's program block to it via signed shortest-path hop counts. Two regimes:
+    //
+    //  * whole-torus boot (chipDimX == 0): hops are computed on the global torus from
+    //    (0,0) to the process's global coordinate.
+    //  * per-chip image (chipDimX > 0, the multi-IC build): each chip boots STANDALONE
+    //    (every edge extend=false, so its folded NoC collapses to a plain chipDim
+    //    torus); `extend` is enabled only AFTER boot. So a core is addressed by its
+    //    chip-LOCAL slot, NOT its global coordinate: the RTL folds the global ring
+    //    through the chip (see Fold), placing global ring position g at local slot
+    //    Fold.local(g). We emit the minimal local hop to that slot. Once extend is
+    //    raised, local slot s becomes global ring position g again, so the run-time
+    //    Send/Recv hops (computed on global coordinates below) route correctly.
+    val wholeTorusOrigin = ProcessIdImpl("boot", 0, 0)
 
     val binary_stream: Seq[Int] =
       assembled.sortBy(p => p.place).flatMap { case AssembledProcess(_, body, loc, epilogue_length, total_length) =>
-        // Encode signed shortest-path hop counts from the Programmer at (0,0) to this process.
         // Negative values are stored as 8-bit 2's complement (& 0xFF masks correctly for Scala Int).
-        val tgt  = ProcessIdImpl(s"t_${loc._1}_${loc._2}", loc._1, loc._2)
-        val xH   = ctx.hw_config.xHops(bootOrigin, tgt) & 0xFF
-        val yH   = ctx.hw_config.yHops(bootOrigin, tgt) & 0xFF
+        val (xH, yH) =
+          if (chipDimX > 0) {
+            val lx = Fold.local(loc._1, chipCols, chipDimX)
+            val ly = Fold.local(loc._2, chipRows, chipDimY)
+            (Fold.localHop(lx, chipDimX) & 0xFF, Fold.localHop(ly, chipDimY) & 0xFF)
+          } else {
+            val tgt = ProcessIdImpl(s"t_${loc._1}_${loc._2}", loc._1, loc._2)
+            (ctx.hw_config.xHops(wholeTorusOrigin, tgt) & 0xFF, ctx.hw_config.yHops(wholeTorusOrigin, tgt) & 0xFF)
+          }
         Seq(
           (yH << 8 | xH).toInt,
           (total_length - epilogue_length).toInt
@@ -128,11 +145,13 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
   def generateCode(
       assembled: Seq[AssembledProcess],
       dir_name: Path,
-      bootOriginX: Int = 0,
-      bootOriginY: Int = 0
+      chipDimX: Int = 0,
+      chipDimY: Int = 0,
+      chipCols: Int = 0,
+      chipRows: Int = 0
   )(implicit ctx: AssemblyContext): Unit = {
 
-    val binary_stream: Seq[Int] = makeBinaryStream(assembled, bootOriginX, bootOriginY)
+    val binary_stream: Seq[Int] = makeBinaryStream(assembled, chipDimX, chipDimY, chipCols, chipRows)
 
     // print the instructions in ASCII format for debugging
     if (ctx.dump_ascii) {

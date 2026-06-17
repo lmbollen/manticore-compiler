@@ -51,19 +51,24 @@ object CodeDump extends FunctionalTransformation[DefProgram, Unit] {
           cy <- 0 until chipRows
           cx <- 0 until chipCols
         } yield {
-          val originX = cx * chipDimX
-          val originY = cy * chipDimY
+          // Membership and boot addressing follow the RTL's FOLDED double-cut torus
+          // (Fold), NOT a contiguous tile: chip (cx, cy) owns the global ring
+          // positions Fold.chip(x)==cx && Fold.chip(y)==cy, which is non-contiguous
+          // for a multi-chip dimension. A contiguous split (x / chipDimX) would load
+          // each core into the wrong physical chip and misroute. MachineCodeGenerator
+          // addresses each core's chip-local slot during the standalone boot.
           def inChip(p: MachineCodeGenerator.AssembledProcess): Boolean =
-            p.place._1 / chipDimX == cx && p.place._2 / chipDimY == cy
+            Fold.chip(p.place._1, chipCols, chipDimX) == cx &&
+              Fold.chip(p.place._2, chipRows, chipDimY) == cy
           val chipName = s"chip_${cx}_${cy}"
           val chipDir  = outDir.toPath.resolve(chipName)
           val initPaths = initializers.zipWithIndex.map { case (init, ix) =>
             val dir = chipDir.resolve(s"init_${ix}")
-            MachineCodeGenerator.generateCode(init.filter(inChip), dir, originX, originY)
+            MachineCodeGenerator.generateCode(init.filter(inChip), dir, chipDimX, chipDimY, chipCols, chipRows)
             dir.resolve("exec.bin").toAbsolutePath().toString()
           }
           val mainDir = chipDir.resolve("main")
-          MachineCodeGenerator.generateCode(mainAssembled.filter(inChip), mainDir, originX, originY)
+          MachineCodeGenerator.generateCode(mainAssembled.filter(inChip), mainDir, chipDimX, chipDimY, chipCols, chipRows)
           (cx, cy, initPaths, mainDir.resolve("exec.bin").toAbsolutePath().toString())
         }
       } else {
@@ -89,8 +94,13 @@ object CodeDump extends FunctionalTransformation[DefProgram, Unit] {
     // chip, each owning that chip's exceptions + global memories.
     val cdX = ctx.chipDimX
     val cdY = if (ctx.chipDimY > 0) ctx.chipDimY else ctx.hw_config.dimY
+    // Group by the FOLDED chip (matching inChip and HeartbeatTileInjectionTransform);
+    // a contiguous (p.id.x / cdX) grouping would put fold-distinct chips' tiles in the
+    // same bucket and spuriously report >1 privileged process per chip.
     def chipOfProc(p: DefProcess): (Int, Int) =
-      if (cdX > 0) (p.id.x / cdX, p.id.y / cdY) else (0, 0)
+      if (cdX > 0)
+        (Fold.chip(p.id.x, ctx.hw_config.dimX / cdX, cdX), Fold.chip(p.id.y, ctx.hw_config.dimY / cdY, cdY))
+      else (0, 0)
     val privilegedByChip: Map[(Int, Int), Seq[DefProcess]] =
       program.processes.filter(_.body.exists(_.isInstanceOf[PrivilegedInstruction])).groupBy(chipOfProc)
     if (cdX > 0) {

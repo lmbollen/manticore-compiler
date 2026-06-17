@@ -6,6 +6,7 @@ import manticore.compiler.assembly.{AssertionInterrupt, FinishInterrupt, StopInt
 import manticore.compiler.assembly.levels.{ConstType, InputType, OutputType, WireType, UInt16}
 import manticore.compiler.assembly.levels.placed.PlacedIR
 import manticore.compiler.assembly.levels.placed.PlacedIRTransformer
+import manticore.compiler.assembly.levels.codegen.Fold
 import manticore.compiler.assembly.annotations.{
   AssemblyAnnotation,
   AssemblyAnnotationFields,
@@ -77,14 +78,21 @@ object HeartbeatTileInjectionTransform extends PlacedIRTransformer {
     // interpreter models only the one-vcycle hop, so we use 1 here.
     val hopLatency = 1
 
-    def chipOf(p: DefProcess): (Int, Int) = (p.id.x / chipDimX, p.id.y / chipDimY)
+    // Chip membership and the master-core coordinate follow the RTL's FOLDED
+    // double-cut torus (Fold), exactly as the CodeDump per-chip split does: a chip
+    // owns a NON-contiguous set of global ring positions, and its master core
+    // (chip-local (0,0)) sits at global Fold.ring(chip, 0) = (cx*chipDimX/2,
+    // cy*chipDimY/2), NOT the contiguous corner (cx*chipDimX, cy*chipDimY).
+    def chipOf(p: DefProcess): (Int, Int) =
+      (Fold.chip(p.id.x, chipCols, chipDimX), Fold.chip(p.id.y, chipRows, chipDimY))
 
     val byChip = program.processes.groupBy(chipOf)
     def isPrivileged(p: DefProcess): Boolean = p.body.exists(_.isInstanceOf[PrivilegedInstruction])
-    def cornerOf(chip: (Int, Int)): (Int, Int) = (chip._1 * chipDimX, chip._2 * chipDimY)
+    def cornerOf(chip: (Int, Int)): (Int, Int) =
+      (Fold.ring(chip._1, 0, chipCols, chipDimX), Fold.ring(chip._2, 0, chipRows, chipDimY))
 
     // EVERY chip in the grid gets exactly one heartbeat tile, on its MASTER core
-    // (chip-local (0,0) = the global corner) — only the master core's exception reaches
+    // (chip-local (0,0) = the folded master coordinate) — only the master core's exception reaches
     // that chip's Management. Selection per chip:
     //   - if the chip hosts the application reporter (a privileged process), that IS the
     //     tile (a second privileged process would break CodeDump; the reporter is placed

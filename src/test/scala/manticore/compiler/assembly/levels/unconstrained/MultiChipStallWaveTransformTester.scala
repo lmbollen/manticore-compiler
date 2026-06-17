@@ -130,8 +130,8 @@ class MultiChipStallWaveTransformTester extends UnitFixtureTest with Matchers {
       dump_all = true,
       dump_dir = Some(fixture.test_dir.toFile),
       use_loc = true,
-      hw_config = DefaultHardwareConfig(dimX = 2, dimY = 1),
-      chipDimX = 1, // two 1x1 chips -> post-placement heartbeat transform engages
+      hw_config = DefaultHardwareConfig(dimX = 4, dimY = 1),
+      chipDimX = 2, // two 2x1 chips (even width — the fold requires even dims) -> heartbeat engages
       stallWave = true,
       stallMargin = 4,
       // cross-chip: reporter exception at vcycle 16, seed = stallMargin + diameter(1)
@@ -162,8 +162,8 @@ class MultiChipStallWaveTransformTester extends UnitFixtureTest with Matchers {
       output_dir = Some(fixture.test_dir.toFile),
       dump_all = false,
       use_loc = true,
-      hw_config = DefaultHardwareConfig(dimX = 2, dimY = 1),
-      chipDimX = 1,
+      hw_config = DefaultHardwareConfig(dimX = 4, dimY = 1),
+      chipDimX = 2,
       stallWave = true,
       stallMargin = 4
     )
