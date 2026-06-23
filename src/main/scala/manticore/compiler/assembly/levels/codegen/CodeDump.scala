@@ -47,6 +47,16 @@ object CodeDump extends FunctionalTransformation[DefProgram, Unit] {
         ctx.logger.info(
           s"Per-chip image split: ${chipCols}x${chipRows} chips of ${chipDimX}x${chipDimY}"
         )
+        // GLOBAL virtual-cycle length per phase, computed over ALL chips' processes (not
+        // each chip's local subset). Every per-IC Management ends a vcycle when its
+        // longest core finishes; if the per-chip images carried their own local-max
+        // vcycle length the chips would DRIFT (vc = wallclock / local_len), desyncing the
+        // cross-chip TDM seam. Forcing one global length keeps them in lockstep — the
+        // short chips just sleep longer (SLEEP_LENGTH = vcycle_length - total_length).
+        val maxLat = ctx.hw_config.maxLatency
+        val globalMainVcycle = mainAssembled.map(_.total).maxOption.getOrElse(0) + maxLat
+        val globalInitVcycles =
+          initializers.map(init => init.map(_.total).maxOption.getOrElse(0) + maxLat)
         for {
           cy <- 0 until chipRows
           cx <- 0 until chipCols
@@ -64,11 +74,13 @@ object CodeDump extends FunctionalTransformation[DefProgram, Unit] {
           val chipDir  = outDir.toPath.resolve(chipName)
           val initPaths = initializers.zipWithIndex.map { case (init, ix) =>
             val dir = chipDir.resolve(s"init_${ix}")
-            MachineCodeGenerator.generateCode(init.filter(inChip), dir, chipDimX, chipDimY, chipCols, chipRows)
+            MachineCodeGenerator.generateCode(
+              init.filter(inChip), dir, chipDimX, chipDimY, chipCols, chipRows, Some(globalInitVcycles(ix)))
             dir.resolve("exec.bin").toAbsolutePath().toString()
           }
           val mainDir = chipDir.resolve("main")
-          MachineCodeGenerator.generateCode(mainAssembled.filter(inChip), mainDir, chipDimX, chipDimY, chipCols, chipRows)
+          MachineCodeGenerator.generateCode(
+            mainAssembled.filter(inChip), mainDir, chipDimX, chipDimY, chipCols, chipRows, Some(globalMainVcycle))
           (cx, cy, initPaths, mainDir.resolve("exec.bin").toAbsolutePath().toString())
         }
       } else {

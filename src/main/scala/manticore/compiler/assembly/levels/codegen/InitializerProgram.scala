@@ -65,7 +65,24 @@ object InitializerProgram extends ((DefProgram, AssemblyContext) => Unit) with H
     alignedInits.transpose.map { initProcs =>
       val maxLen = initProcs.maxBy(_.body.length).body.length
       val withFinish = initProcs.map { init =>
-        val isMaster = (init.id.x == 0 && init.id.y == 0)
+        // An init phase terminates when the chip's MASTER core (chip-local (0,0), where
+        // hasMemory / Management / the privileged tile sit) raises a FINISH. Single-chip
+        // (whole-torus boot): the one global master at (0,0). Per-chip split
+        // (ctx.chipDimX > 0): EVERY chip's master, identified by its chip-local coordinate
+        // under the fold being (0,0) — so each chip's filtered (inChip) init self-FINISHes.
+        // Without this the non-reporter chips, lacking a local FINISH, loop their one-time
+        // init forever (the reporter's FINISH lives on chip (0,0) and is filtered away).
+        val isMaster =
+          if (ctx.chipDimX > 0) {
+            val chipDimX = ctx.chipDimX
+            val chipDimY = if (ctx.chipDimY > 0) ctx.chipDimY else ctx.hw_config.dimY
+            val chipCols = ctx.hw_config.dimX / chipDimX
+            val chipRows = ctx.hw_config.dimY / chipDimY
+            Fold.local(init.id.x, chipCols, chipDimX) == 0 &&
+            Fold.local(init.id.y, chipRows, chipDimY) == 0
+          } else {
+            init.id.x == 0 && init.id.y == 0
+          }
         if (isMaster) {
 
           init.copy(

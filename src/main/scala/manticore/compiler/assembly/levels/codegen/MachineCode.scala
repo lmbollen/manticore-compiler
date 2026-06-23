@@ -49,7 +49,13 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
       chipDimX: Int = 0,
       chipDimY: Int = 0,
       chipCols: Int = 0,
-      chipRows: Int = 0
+      chipRows: Int = 0,
+      // Multi-chip only: force this image's virtual-cycle length to a caller-supplied
+      // GLOBAL value instead of this chip's local max. Every per-IC Management ends a
+      // vcycle when its longest core finishes (execution_active negedge), so unless all
+      // chips share one vcycle length they DRIFT (vc = wallclock / local_len) and the
+      // cross-chip TDM-seam Send/Recv timing desyncs. None => single-chip local max.
+      vcycleLengthOverride: Option[Int] = None
   )(implicit ctx: AssemblyContext): Seq[Int] = {
 
     // +++++++++++++++++++++ MANTICORE BINARY STREAM FORMAT+++++++++++++++++++++++++++
@@ -92,7 +98,7 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
     //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
     val vcycle_length =
-      assembled.map(_.total).max + ctx.hw_config.maxLatency
+      vcycleLengthOverride.getOrElse(assembled.map(_.total).max + ctx.hw_config.maxLatency)
     ctx.logger.info(s"Virtual cycle length: ${vcycle_length}")
     // for each process p , we need to compute the SLEEP_LENGTH as
     // vcycle_length - p.total (total is the total execution time including epilogue)
@@ -148,10 +154,11 @@ object MachineCodeGenerator extends ((DefProgram, AssemblyContext) => Unit) with
       chipDimX: Int = 0,
       chipDimY: Int = 0,
       chipCols: Int = 0,
-      chipRows: Int = 0
+      chipRows: Int = 0,
+      vcycleLengthOverride: Option[Int] = None
   )(implicit ctx: AssemblyContext): Unit = {
 
-    val binary_stream: Seq[Int] = makeBinaryStream(assembled, chipDimX, chipDimY, chipCols, chipRows)
+    val binary_stream: Seq[Int] = makeBinaryStream(assembled, chipDimX, chipDimY, chipCols, chipRows, vcycleLengthOverride)
 
     // print the instructions in ASCII format for debugging
     if (ctx.dump_ascii) {
