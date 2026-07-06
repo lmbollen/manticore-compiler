@@ -58,44 +58,60 @@ private[lowering] class NetworkOnChip(val cfg: HardwareConfig) {
 
     // Sequence of switches visited while routing in the X dimension.
     // Steps occupy linksXPos (xDist > 0) or linksXNeg (xDist < 0).
-    // Each step's time advances by the (per-directed-link) hop latency: 1 for a plain
-    // on-chip hop, more for a configured slow link (e.g. an inter-chip crossing). With
-    // no hopLatencies configured this reduces exactly to the previous +1-per-hop model.
+    //
+    // REGISTER-ANCHORING: a Step's cell `links*(loc)` names the NEAR-end output
+    // register of the hop INTO `loc` (e.g. linksXPos(k) = the x_reg of switch
+    // k-1). That register is physically occupied ONE cycle after the previous
+    // hop, regardless of the link's latency — the extra latency of a slow
+    // (seam) link is spent BETWEEN the two registers, in the TDM bridge/wire.
+    // So each Step is reserved at departure+1 while the running clock `t`
+    // advances by the full link latency to time the ARRIVAL at the far end
+    // (which the NEXT step's departure builds on). For 1-cycle on-chip links
+    // the two coincide and this reduces exactly to the previous model; for
+    // seam links the old code reserved the near-end register at the FAR-end
+    // arrival time (departure+L instead of departure+1) — physically
+    // coinciding register uses looked disjoint to the scheduler, causing
+    // silent last-writer-wins drops at every seam-adjacent switch (deep links
+    // shift the error by L-1, e.g. 1297 cycles on the rig's long cable).
+    private var tClk = enqueueTime - 1 // the source switch's channel register
     val xHops: Seq[Step] = {
       val east = xDist >= 0
-      var t    = enqueueTime - 1 // the source switch's channel register
       Seq.tabulate(math.abs(xDist)) { i =>
         val fromX = mod(from.x + (if (east) i else -i), cfg.dimX)
         val toX   = mod(from.x + (if (east) i + 1 else -(i + 1)), cfg.dimX)
-        t += cfg.xLinkLatency(fromX, from.y, east)
-        Step(toX, t, cfg.xLinkOccupancy(fromX, from.y, east))
+        val step  = Step(toX, tClk + 1, cfg.xLinkOccupancy(fromX, from.y, east))
+        tClk += cfg.xLinkLatency(fromX, from.y, east)
+        step
       }
     }
 
-    // Time at which the packet leaves the last X hop (or enqueueTime if no X hops).
-    private val xDoneTime: Int = if (xHops.nonEmpty) xHops.last.t else enqueueTime - 1
+    // Time at which the packet ARRIVES out of the last X hop (enqueueTime - 1 if none).
+    private val xDoneTime: Int = tClk
 
     // Sequence of switches visited while routing in the Y dimension (at column to.x).
     // The LAST entry (lastHop) models the y_reg write in the destination switch;
     // it always occupies linksYPos because terminal delivery uses yOutput regardless
-    // of the arrival direction.
+    // of the arrival direction. Same register-anchoring as xHops: each transit
+    // Step is reserved at departure+1 (the near-end y_reg), while the running
+    // clock advances by the link latency for the far-end arrival.
     val yHops: Seq[Step] = {
       val north = yDist >= 0
       val transit: Seq[Step] = {
-        var t = xDoneTime
         Seq.tabulate(math.abs(yDist)) { i =>
           val fromY = mod(from.y + (if (north) i else -i), cfg.dimY)
           val toY   = mod(from.y + (if (north) i + 1 else -(i + 1)), cfg.dimY)
-          t += cfg.yLinkLatency(to.x, fromY, north)
-          Step(toY, t, cfg.yLinkOccupancy(to.x, fromY, north))
+          val step  = Step(toY, tClk + 1, cfg.yLinkOccupancy(to.x, fromY, north))
+          tClk += cfg.yLinkLatency(to.x, fromY, north)
+          step
         }
       }
 
-      // lastHop: the destination switch's y_reg at delivery time.
+      // lastHop: the destination switch's y_reg at delivery time — one cycle
+      // after the packet ARRIVES at the destination switch's input (tClk).
       // For northbound: the slot is at (to.y + 1) % dimY.
       // For southbound: delivery also goes through y_reg → same model, so
       // lastHop location is (to.y + 1) % dimY regardless of direction.
-      val lastHopTime = if (transit.nonEmpty) transit.last.t + 1 else xDoneTime + 1
+      val lastHopTime = tClk + 1
       assert(
         xHops.nonEmpty || yDist != 0,
         s"Can not have self messages: send ${send.serialized} from $from with xDist=$xDist yDist=$yDist"
