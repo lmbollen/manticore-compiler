@@ -68,29 +68,38 @@ object InterruptLoweringTransform extends PlacedIRTransformer {
       }
     }
     class SerialQueue {
-      private val queue        = scala.collection.mutable.Queue.empty[UInt16]
-      private var maxQueueSize = 0
-      private var order        = 0
-      private var memoryName   = s"%system${ctx.uniqueNumber()}"
+      private val queue      = scala.collection.mutable.Queue.empty[UInt16]
+      // Process-global trace-word allocator: offsets are unique across ALL
+      // display statements of the process (NOT per-statement). With
+      // per-statement numbering every $display started at word 0, so under the
+      // armed (non-draining) flow — where the host can only read gmem after
+      // the run — later statements overwrote earlier ones and only the
+      // last-fired $display's values survived. Globally-unique offsets give
+      // each statement its own gmem region, so the final values of EVERY
+      // display statement are simultaneously readable. Single-display
+      // programs keep their old offsets (0..k-1). The per-statement offsets
+      // reach the runtime through the manifest (fmt "offsets"), so decoders
+      // are unaffected.
+      private var nextWord   = 0
+      private var memoryName = s"%system${ctx.uniqueNumber()}"
       def flush(): Seq[UInt16] = {
         queue.dequeueAll(_ => true)
       }
       def put(pt: PutSerial): GlobalStore = {
-        val index = queue.length
+        val index = nextWord
+        nextWord += 1
         val instr = GlobalStore(
           pt.rs,
           Seq(getConstant(UInt16(index)), getConstant(UInt16(0)), getConstant(UInt16(0))),
           Some(pt.pred),
           pt.order
         )
-        order += 1
         queue += UInt16(index)
-        maxQueueSize = maxQueueSize max queue.length
         instr
       }
       def mkGlobalMemory =  {
         assert(queue.isEmpty, "something is up with lowering PutSerial/SerialInterrupt")
-        DefGlobalMemory(memoryName, maxQueueSize, 0)
+        DefGlobalMemory(memoryName, nextWord, 0)
       }
     }
     var successEid  = new UpCounter(0)

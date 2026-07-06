@@ -109,4 +109,25 @@ module Main(input wire clock);
 			$finish;
 		end
 	end
+
+	// --- CHK: multi-state $display self-check, reporter-local ---
+	// Three state registers with distinct update rules and widths (8-bit +3
+	// counter, 16-bit Fibonacci LFSR, 32-bit accumulator), displayed by a
+	// SECOND display statement on a different phase than SIG. All state is
+	// read only by this block and the display, so the whole check co-locates
+	// with the privileged (reporter) process: its values do not cross any
+	// chip seam, making it a pure end-to-end test of the $display/trace
+	// mechanism (guest state -> GST trace words -> FLUSH -> host readback) —
+	// meaningful even while cross-seam application values are under debug.
+	reg [7:0]  chk_cnt  = 0;
+	reg [15:0] chk_lfsr = 16'hACE1;
+	reg [31:0] chk_acc  = 0;
+	always @(posedge clock) begin
+		chk_cnt  <= chk_cnt + 8'd3;
+		chk_lfsr <= {chk_lfsr[14:0], chk_lfsr[15] ^ chk_lfsr[13] ^ chk_lfsr[12] ^ chk_lfsr[10]};
+		chk_acc  <= chk_acc + {24'd0, chk_lfsr[7:0]};
+		if (cyc[7:0] == 8'h7F) begin
+			$display("CHK %d %d %d", chk_cnt, chk_lfsr, chk_acc);
+		end
+	end
 endmodule
