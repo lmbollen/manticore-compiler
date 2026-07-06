@@ -119,15 +119,26 @@ module Main(input wire clock);
 	// chip seam, making it a pure end-to-end test of the $display/trace
 	// mechanism (guest state -> GST trace words -> FLUSH -> host readback) —
 	// meaningful even while cross-seam application values are under debug.
+	// The display reads the NEXT-value wires (not the current registers): the
+	// freshly-computed next values sit in the display's backward dataflow cone,
+	// which pulls the state-update logic into the same extracted process as the
+	// display itself (the process extractor unions a sink with a state element
+	// when the sink's cone references the state's next-value register). This
+	// keeps the CHK state machines co-located with the privileged reporter
+	// process instead of being split out and placed — possibly chips away —
+	// which would route their values across seams.
 	reg [7:0]  chk_cnt  = 0;
 	reg [15:0] chk_lfsr = 16'hACE1;
 	reg [31:0] chk_acc  = 0;
+	wire [7:0]  chk_cnt_next  = chk_cnt + 8'd3;
+	wire [15:0] chk_lfsr_next = {chk_lfsr[14:0], chk_lfsr[15] ^ chk_lfsr[13] ^ chk_lfsr[12] ^ chk_lfsr[10]};
+	wire [31:0] chk_acc_next  = chk_acc + {24'd0, chk_lfsr[7:0]};
 	always @(posedge clock) begin
-		chk_cnt  <= chk_cnt + 8'd3;
-		chk_lfsr <= {chk_lfsr[14:0], chk_lfsr[15] ^ chk_lfsr[13] ^ chk_lfsr[12] ^ chk_lfsr[10]};
-		chk_acc  <= chk_acc + {24'd0, chk_lfsr[7:0]};
+		chk_cnt  <= chk_cnt_next;
+		chk_lfsr <= chk_lfsr_next;
+		chk_acc  <= chk_acc_next;
 		if (cyc[7:0] == 8'h7F) begin
-			$display("CHK %d %d %d", chk_cnt, chk_lfsr, chk_acc);
+			$display("CHK %d %d %d", chk_cnt_next, chk_lfsr_next, chk_acc_next);
 		end
 	end
 endmodule
