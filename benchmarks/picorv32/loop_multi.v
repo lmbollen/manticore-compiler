@@ -8,7 +8,9 @@
 
 `timescale 1 ns / 1 ps
 
-module picorv_unit (
+module picorv_unit #(
+	parameter [31:0] UNIT_ID = 0
+) (
 	input  wire        clock,
 	output reg  [31:0] signature
 );
@@ -84,6 +86,17 @@ module picorv_unit (
 				memory[mem_word_addr] <= wword;
 			end
 		end
+		// USIG frontier probe: display this unit's signature FROM ITS OWN
+		// process (this block owns `signature`, so the display co-locates with
+		// it — same extraction rule the CHK block documents). Its trace words
+		// are therefore written by whichever CHIP the unit's signature lands
+		// on, giving a per-unit data-frontier readout that does not depend on
+		// any cross-seam route: frozen-zero here means the unit's own
+		// (grid-spread) dataflow is dead; golden here with a zero reporter SIG
+		// isolates the loss to the signature->reporter seam routes.
+		if (cycle_counter[7:0] == 8'hBF) begin
+			$display("USIG %d %d", UNIT_ID, signature);
+		end
 	end
 endmodule
 
@@ -94,9 +107,9 @@ module Main(input wire clock);
 
 	wire [31:0] sig0, sig1, sig2;
 
-	picorv_unit u0(.clock(clock), .signature(sig0));
-	picorv_unit u1(.clock(clock), .signature(sig1));
-	picorv_unit u2(.clock(clock), .signature(sig2));
+	picorv_unit #(.UNIT_ID(0)) u0(.clock(clock), .signature(sig0));
+	picorv_unit #(.UNIT_ID(1)) u1(.clock(clock), .signature(sig1));
+	picorv_unit #(.UNIT_ID(2)) u2(.clock(clock), .signature(sig2));
 
 	// single reporter == the only privileged process
 	reg [31:0] cyc = 0;
